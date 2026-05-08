@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/cube-sandbox-logo.png" alt="Cube Sandbox Logo" width="140" />
+  <a href="https://x.com/CubeSandbox_AI" target="_blank"><img src="docs/assets/cube-sandbox-logo.png" alt="Cube Sandbox Logo" width="140" /></a>
 </p>
 
 <h1 align="center">CubeSandbox</h1>
@@ -26,7 +26,8 @@
   <a href="./README_zh.md"><strong>中文文档</strong></a> ·
   <a href="./docs/guide/quickstart.md"><strong>Quick Start</strong></a> ·
   <a href="./docs/index.md"><strong>Documentation</strong></a> ·
-  <a href="./docs/changelog.md"><strong>Changelog</strong></a>
+  <a href="./docs/changelog.md"><strong>Changelog</strong></a> ·
+  <a href="https://x.com/CubeSandbox_AI"><strong>X(Twitter)</strong></a>
 </p>
 
 ---
