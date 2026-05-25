@@ -241,6 +241,90 @@ run_mkfs_ext4_with_optional_sudo() {
   sudo mkfs.ext4 "$@"
 }
 
+run_as_root() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    "$@"
+    return $?
+  fi
+
+  # Try without sudo first so the caller can still capture stdout via $(...).
+  # Only stderr is silenced so a permission error doesn't pollute the log
+  # before the sudo fallback retries.
+  local rc=0
+  "$@" 2>/dev/null
+  rc=$?
+  if [[ ${rc} -eq 0 ]]; then
+    return 0
+  fi
+
+  require_cmd sudo
+  sudo "$@"
+}
+
+# Locale-stable dumpe2fs wrapper: dumpe2fs translates field names under
+# non-C locales, which would break the awk parsing in shrink_ext4_image.
+dump_ext4_header() {
+  local img="$1"
+  if [[ "${EUID}" -eq 0 ]]; then
+    LC_ALL=C dumpe2fs -h "${img}" 2>/dev/null
+    return $?
+  fi
+
+  if LC_ALL=C dumpe2fs -h "${img}" 2>/dev/null; then
+    return 0
+  fi
+
+  require_cmd sudo
+  sudo LC_ALL=C dumpe2fs -h "${img}" 2>/dev/null
+}
+
+SHRINK_RESERVED_BYTES="${ONE_CLICK_GUEST_IMAGE_RESERVED_BYTES:-$((32 * 1024 * 1024))}"
+
+# Shrink the ext4 image to its minimum size, then grow it by RESERVED bytes of
+# free headroom so the guest still has room for runtime writes.
+shrink_ext4_image() {
+  local img="$1"
+  local reserved_bytes="${2:-${SHRINK_RESERVED_BYTES}}"
+  local dumpe2fs_out block_size min_blocks reserved_blocks target_blocks final_bytes min_bytes
+
+  run_as_root e2fsck -fy "${img}" >&2 || true
+  run_as_root resize2fs -M "${img}" >&2
+
+  dumpe2fs_out="$(dump_ext4_header "${img}")"
+  block_size="$(printf '%s\n' "${dumpe2fs_out}" | awk -F': *' '/^Block size/ {print $2; exit}')"
+  min_blocks="$(printf '%s\n' "${dumpe2fs_out}" | awk -F': *' '/^Block count/ {print $2; exit}')"
+
+  if [[ -z "${block_size}" || -z "${min_blocks}" ]]; then
+    die "failed to parse ext4 metadata from ${img}"
+  fi
+
+  reserved_blocks="$(( (reserved_bytes + block_size - 1) / block_size ))"
+  target_blocks="$(( min_blocks + reserved_blocks ))"
+  final_bytes="$(( target_blocks * block_size ))"
+  min_bytes="$(( min_blocks * block_size ))"
+
+  # Defensive sanity check: truncating below the shrunk filesystem size would
+  # chop live FS data. With reserved_blocks >= 0 this should never trigger,
+  # but we want a clear failure if future refactors break the invariant.
+  if (( final_bytes < min_bytes )); then
+    die "shrink target ${final_bytes} smaller than ext4 minimum ${min_bytes}"
+  fi
+
+  # The resulting ext4 file is sparse: ext4 free space inside the image
+  # corresponds to filesystem holes on the host. Packagers that don't
+  # preserve sparseness (e.g. plain tar without --sparse) will inflate
+  # the file back to its apparent size, but gzip still compresses the
+  # zeroed extents efficiently.
+  run_as_root truncate -s "${final_bytes}" "${img}"
+  run_as_root resize2fs "${img}" "${target_blocks}" >&2
+  run_as_root e2fsck -fy "${img}" >&2 || true
+
+  local human_final human_reserved
+  human_final="$(numfmt --to=iec --suffix=B "${final_bytes}" 2>/dev/null || echo "${final_bytes}")"
+  human_reserved="$(numfmt --to=iec --suffix=B "${reserved_bytes}" 2>/dev/null || echo "${reserved_bytes}")"
+  log "guest image shrunk to ${human_final} (reserved ${human_reserved} headroom)"
+}
+
 remove_path_with_optional_sudo() {
   if [[ "$#" -eq 0 ]]; then
     return 0
@@ -356,6 +440,8 @@ build_guest_image_artifacts() {
   truncate -s "${image_size_bytes}" "${output_img}"
   run_mkfs_ext4_with_optional_sudo -F -d "${GUEST_ROOTFS_DIR}" "${output_img}" >&2
 
+  shrink_ext4_image "${output_img}"
+
   printf '%s\n' "${GUEST_IMAGE_VERSION}" > "${output_version}"
 
   docker rm -f "${guest_container_id}" >/dev/null 2>&1 || true
@@ -368,6 +454,9 @@ require_cmd python3
 require_cmd truncate
 require_cmd ldd
 require_cmd mkfs.ext4
+require_cmd e2fsck
+require_cmd resize2fs
+require_cmd dumpe2fs
 require_cmd docker
 require_cmd tar
 
